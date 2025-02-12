@@ -50,6 +50,7 @@ struct Participiant {
     broadcast_tx: Sender<Message>,
     max_signers: u16,
     min_signers: u16,
+    is_tracing: bool,
 }
 
 impl Participiant {
@@ -63,6 +64,7 @@ impl Participiant {
             broadcast_tx: tx,
             max_signers,
             min_signers,
+            is_tracing: false,
         }
     }
 
@@ -84,97 +86,120 @@ impl Participiant {
             round1_packages: BTreeMap::new(),
         });
 
-        while let Ok(message) = self.broadcast_rx.recv().await {
-            let state = state_opt.take().unwrap();
-            state_opt = Some(match (state, message) {
-                (
-                    DkgState::Round1 {
-                        round1_secret_package: secret_package,
-                        mut round1_packages,
-                    },
-                    Message::Round1 {
-                        sender_id: id,
-                        round1_package: package,
-                    },
-                ) => {
-                    if id != self.id {
-                        round1_packages.insert(id, package);
-                    }
+        loop {
+            match self.broadcast_rx.recv().await {
+                Ok(message) => {
+                    //if self.is_tracing {
+                    //    println!("message {message:?}");
+                    //}
 
-                    if round1_packages.len() > self.min_signers.into() {
-                        let (round2_secret_package, round2_packages) =
-                            frost::keys::dkg::part2(secret_package, &round1_packages)?;
+                    let state = state_opt.take().unwrap();
 
-                        for (for_id, package) in round2_packages {
-                            self.broadcast_tx.send(Message::Round2 {
+                    state_opt = Some(match (state, message) {
+                        (
+                            DkgState::Round1 {
+                                round1_secret_package: secret_package,
+                                mut round1_packages,
+                            },
+                            Message::Round1 {
+                                sender_id: id,
+                                round1_package: package,
+                            },
+                        ) => {
+                            if id != self.id {
+                                round1_packages.insert(id, package);
+                            }
+
+                            if round1_packages.len() > self.min_signers.into() {
+                                let (round2_secret_package, round2_packages) =
+                                    frost::keys::dkg::part2(secret_package, &round1_packages)?;
+
+                                for (for_id, package) in round2_packages {
+                                    self.broadcast_tx.send(Message::Round2 {
+                                        sender_id: self.id,
+                                        for_id,
+                                        round2_package: package,
+                                    })?;
+                                }
+
+                                DkgState::Round2 {
+                                    round2_secret_package,
+                                    round1_packages,
+                                    round2_packages: Default::default(),
+                                }
+                            } else {
+                                DkgState::Round1 {
+                                    round1_secret_package: secret_package,
+                                    round1_packages,
+                                }
+                            }
+                        }
+                        (
+                            DkgState::Round2 {
+                                round2_secret_package: secret_package,
+                                round1_packages,
+                                mut round2_packages,
+                            },
+                            Message::Round2 {
                                 sender_id: id,
                                 for_id,
-                                round2_package: package,
-                            })?;
-                        }
+                                round2_package,
+                            },
+                        ) => {
+                            // NOTE: no auth, so just designate which signer will receive package
+                            if for_id == self.id {
+                                round2_packages.insert(id, round2_package);
 
-                        DkgState::Round2 {
-                            round2_secret_package,
-                            round1_packages,
-                            round2_packages: Default::default(),
-                        }
-                    } else {
-                        DkgState::Round1 {
-                            round1_secret_package: secret_package,
-                            round1_packages,
-                        }
-                    }
-                }
-                (
-                    DkgState::Round2 {
-                        round2_secret_package: secret_package,
-                        round1_packages,
-                        mut round2_packages,
-                    },
-                    Message::Round2 {
-                        sender_id: id,
-                        for_id,
-                        round2_package,
-                    },
-                ) => {
-                    // NOTE: no auth, so just designate which signer will receive package
-                    if for_id == self.id {
-                        round2_packages.insert(id, round2_package);
-                    }
+                                if self.is_tracing {
+                                    println!("added package, len is {}", round2_packages.len());
+                                }
+                            }
 
-                    if round2_packages.len() > self.min_signers.into() {
-                        let (key_package, pubkey_package) = frost::keys::dkg::part3(
-                            &secret_package,
-                            &round1_packages,
-                            &round2_packages,
-                        )?;
+                            if self.is_tracing {
+                                println!(
+                                    "round2 packages len {}, need {}",
+                                    round2_packages.len(),
+                                    self.min_signers
+                                );
+                            }
 
-                        return Ok((pubkey_package, key_package));
-                    } else {
-                        DkgState::Round2 {
-                            round2_secret_package: secret_package,
-                            round1_packages,
-                            round2_packages,
+                            if round2_packages.len() > self.min_signers.into() {
+                                let (key_package, pubkey_package) = frost::keys::dkg::part3(
+                                    &secret_package,
+                                    &round1_packages,
+                                    &round2_packages,
+                                )?;
+
+                                return Ok((pubkey_package, key_package));
+                            } else {
+                                DkgState::Round2 {
+                                    round2_secret_package: secret_package,
+                                    round1_packages,
+                                    round2_packages,
+                                }
+                            }
                         }
-                    }
+                        (state, message) => {
+                            bail!("Unexpected message {message:?} for state {state:?}")
+                        }
+                    })
                 }
-                (state, message) => {
-                    bail!("Unexpected message {message:?} for state {state:?}")
+                Err(error) => {
+                    return Err(eyre::eyre!(error));
                 }
-            })
+            }
         }
-
-        bail!("shutting down");
     }
 }
 
 pub async fn sign(_message: &[u8], max_signers: u16, min_signers: u16) -> eyre::Result<Signature> {
-    let (tx, _rx1) = tokio::sync::broadcast::channel::<Message>(max_signers.into());
+    let (tx, _rx1) = tokio::sync::broadcast::channel::<Message>(1000);
     let mut participiants =
         std::iter::repeat_with(|| Participiant::new(max_signers, min_signers, tx.clone()))
             .take(max_signers.into());
 
-    let participiant1 = participiants.next().unwrap();
+    let mut participiant1 = participiants.next().unwrap();
+    participiant1.is_tracing = true;
 
     for p in participiants {
         tokio::spawn(async move {
