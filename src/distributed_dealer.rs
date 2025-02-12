@@ -12,6 +12,7 @@ use frost_ristretto255::{
     },
     Identifier, Signature,
 };
+use rand::RngCore;
 use tokio::sync::broadcast::{Receiver, Sender};
 
 #[derive(Debug, Clone)]
@@ -53,7 +54,7 @@ struct Participiant {
 
 impl Participiant {
     fn new(max_signers: u16, min_signers: u16, tx: Sender<Message>) -> Self {
-        let id = format!("id-{:?}", rand::thread_rng());
+        let id = format!("id-{:?}", rand::thread_rng().next_u64());
         let id = Identifier::derive(id.as_bytes()).expect("works");
 
         Self {
