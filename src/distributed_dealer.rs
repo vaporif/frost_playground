@@ -1,18 +1,17 @@
-use std::{collections::BTreeMap, default};
+use std::collections::BTreeMap;
 
 use eyre::bail;
 use frost_ristretto255::{
     self as frost,
     keys::{
         dkg::{
-            round1::{self, SecretPackage},
+            round1::{self},
             round2,
         },
         KeyPackage, PublicKeyPackage,
     },
     Identifier, Signature,
 };
-use rand::{CryptoRng, RngCore};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 #[derive(Debug, Clone)]
@@ -32,11 +31,11 @@ enum Message {
 #[derive(Debug, PartialEq)]
 enum DkgState {
     Round1 {
-        secret_package: round1::SecretPackage,
+        round1_secret_package: round1::SecretPackage,
         round1_packages: BTreeMap<Identifier, round1::Package>,
     },
     Round2 {
-        secret_package: round2::SecretPackage,
+        round2_secret_package: round2::SecretPackage,
         round1_packages: BTreeMap<Identifier, round1::Package>,
         round2_packages: BTreeMap<Identifier, round2::Package>,
     },
@@ -57,15 +56,13 @@ impl Participiant {
         let id = format!("id-{:?}", rand::thread_rng());
         let id = Identifier::derive(id.as_bytes()).expect("works");
 
-        let this = Self {
+        Self {
             id,
             broadcast_rx: tx.subscribe(),
             broadcast_tx: tx,
             max_signers,
             min_signers,
-        };
-
-        this
+        }
     }
 
     async fn run(mut self) -> eyre::Result<(PublicKeyPackage, KeyPackage)> {
@@ -73,7 +70,7 @@ impl Participiant {
             self.id,
             self.max_signers,
             self.min_signers,
-            &mut rand::thread_rng(),
+            rand::thread_rng(),
         )?;
 
         self.broadcast_tx.send(Message::Round1 {
@@ -82,7 +79,7 @@ impl Participiant {
         })?;
 
         let mut state_opt = Some(DkgState::Round1 {
-            secret_package,
+            round1_secret_package: secret_package,
             round1_packages: BTreeMap::new(),
         });
 
@@ -91,7 +88,7 @@ impl Participiant {
             state_opt = Some(match (state, message) {
                 (
                     DkgState::Round1 {
-                        secret_package,
+                        round1_secret_package: secret_package,
                         mut round1_packages,
                     },
                     Message::Round1 {
@@ -99,11 +96,9 @@ impl Participiant {
                         round1_package: package,
                     },
                 ) => {
-                    if id == self.id {
-                        continue;
+                    if id != self.id {
+                        round1_packages.insert(id, package);
                     }
-
-                    round1_packages.insert(id, package);
 
                     if round1_packages.len() > self.min_signers.into() {
                         let (round2_secret_package, round2_packages) =
@@ -118,20 +113,20 @@ impl Participiant {
                         }
 
                         DkgState::Round2 {
-                            secret_package: round2_secret_package,
+                            round2_secret_package,
                             round1_packages,
                             round2_packages: Default::default(),
                         }
                     } else {
                         DkgState::Round1 {
-                            secret_package,
+                            round1_secret_package: secret_package,
                             round1_packages,
                         }
                     }
                 }
                 (
                     DkgState::Round2 {
-                        secret_package,
+                        round2_secret_package: secret_package,
                         round1_packages,
                         mut round2_packages,
                     },
@@ -141,16 +136,10 @@ impl Participiant {
                         round2_package,
                     },
                 ) => {
-                    if id == self.id {
-                        continue;
+                    // NOTE: no auth, so just designate which signer will receive package
+                    if for_id == self.id {
+                        round2_packages.insert(id, round2_package);
                     }
-
-                    if for_id != self.id {
-                        // NOTE: no auth, so just designate which signer will receive package
-                        continue;
-                    }
-
-                    round2_packages.insert(id, round2_package);
 
                     if round2_packages.len() > self.min_signers.into() {
                         let (key_package, pubkey_package) = frost::keys::dkg::part3(
@@ -162,7 +151,7 @@ impl Participiant {
                         return Ok((pubkey_package, key_package));
                     } else {
                         DkgState::Round2 {
-                            secret_package,
+                            round2_secret_package: secret_package,
                             round1_packages,
                             round2_packages,
                         }
@@ -178,7 +167,7 @@ impl Participiant {
     }
 }
 
-pub async fn sign(message: &[u8], max_signers: u16, min_signers: u16) -> eyre::Result<Signature> {
+pub async fn sign(_message: &[u8], max_signers: u16, min_signers: u16) -> eyre::Result<Signature> {
     let (tx, _rx1) = tokio::sync::broadcast::channel::<Message>(max_signers.into());
     let mut participiants =
         std::iter::repeat_with(|| Participiant::new(max_signers, min_signers, tx.clone()))
@@ -188,7 +177,7 @@ pub async fn sign(message: &[u8], max_signers: u16, min_signers: u16) -> eyre::R
 
     for p in participiants {
         tokio::spawn(async move {
-            p.run().await;
+            _ = p.run().await;
         });
     }
 

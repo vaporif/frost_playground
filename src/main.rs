@@ -9,7 +9,7 @@ async fn main() -> eyre::Result<()> {
     let signature = trusted_dealer::sign(message.as_bytes(), max_signers, min_signers);
     println!("signature is {:?}", signature);
 
-    let (signature) = distributed_dealer::sign(message.as_bytes(), max_signers, min_signers)
+    let _signature = distributed_dealer::sign(message.as_bytes(), max_signers, min_signers)
         .await
         .expect("works");
 

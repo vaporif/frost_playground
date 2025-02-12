@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use frost_ristretto255::{
     self as frost,
@@ -79,6 +79,7 @@ impl Coordinator {
 }
 
 pub struct Participiant {
+    #[allow(dead_code)]
     pub id: Identifier,
     pub key_package: KeyPackage,
     pub nonces: Option<SigningNonces>,
